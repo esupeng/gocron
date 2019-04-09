@@ -10,6 +10,7 @@
 原有的延时任务拆分为独立项目[延迟队列](https://github.com/ouqiang/delay-queue)  
 
 ## 功能特性
+** 新增锁监控，循环数据源配置表，锁记录本地/tmp/mysql-lock.log ，超过阈值发送钉钉告警消息
 * Web界面管理定时任务
 * crontab时间表达式, 精确到秒
 * 任务执行失败可重试
