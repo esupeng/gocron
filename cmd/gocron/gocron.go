@@ -26,6 +26,8 @@ var (
 	lockLogFD *os.File
 	AppVersion           = "1.5"
 	BuildDate, GitCommit string
+	warnStep int = 5
+	errStep int = 50
 )
 
 // web服务器默认端口
@@ -243,10 +245,21 @@ func mysqlLockDetector() {
 				"status":           "none",
 				// "task_id":          taskModel.Id,
 			}
+			if len(locks) > warnStep && warnSent[eachHost.Host] == 1  {
+					msg["output"] = fmt.Sprintf("警告： hostname: %v 锁记录数量当前为 %v 个 " ,eachHost.Host,len(locks))
+					msg["name"] = fmt.Sprintf("警告： hostname: %v 锁记录数量超过%v个 " ,eachHost.Host,warnStep)
+					notify.Push(msg)
+				warnSent[eachHost.Host] = 2
+			}
+			if len(locks) > errStep && warnSent[eachHost.Host] == 2 {
+				msg["output"] = fmt.Sprintf("警告： hostname: %v 锁记录数量 - %v 个 " ,eachHost.Host,len(locks))
+				msg["name"] = fmt.Sprintf("警告： hostname: %v 锁记录数量超过%v个 " ,eachHost.Host,errStep)
+				notify.Push(msg)
+				warnSent[eachHost.Host] = 5
+			}
 
 
 			if len(locks) > 0 {
-				step := 0
 				outputString := ""
 				for _, eachLock := range locks {
 					rID, err := strconv.ParseInt(string(eachLock["request_mysql_ID"]), 10, 64)
@@ -265,12 +278,7 @@ func mysqlLockDetector() {
 						continue
 					}
 					if len(lock) == 0 {
-						step ++
-						fmt.Println(step)
-						if step ==  5 {
-							msg["output"] = fmt.Sprintf("警告： hostname: %v 锁记录数量超过5个 " ,eachHost.Host)
-							notify.Push(msg)
-						}
+
 						mysqlLock := models.MysqlLocks{
 							HostName:              eachHost.Host,
 							Status:                1,
@@ -282,11 +290,11 @@ func mysqlLockDetector() {
 							CreateTime:            time.Now(),
 						}
 						err = mysqlLock.Add()
-						outputString = fmt.Sprintf("\\[time:%v\\] host: %v MySQL thread ID:%v - Command: %v  blocked by  MySQL thread ID:%v - Command: %v  with index :  %v\n",time.Now(), eachHost.Host, rID, string(eachLock["request_command"]), bID, string(eachLock["blocking_command"]), string(eachLock["lock_index"]))
+						outputString = fmt.Sprintf(`{"time":"%v", "host":"%v","log":"MySQL thread ID:%v - Command: %v  blocked by  MySQL thread ID:%v - Command: %v  with index :  %v"}`,time.Now().Format("2006-01-02 15:04:05.000"), eachHost.Host, rID, string(eachLock["request_command"]), bID, string(eachLock["blocking_command"]), string(eachLock["lock_index"]))
 						// send Warn
 						//webHook := WebHook{}
 						//go webHook.Send(msg)
-						err = myLock.WriteLogToFile(outputString,lockLogFD)
+						err = myLock.WriteLogToFile(outputString + "\n",lockLogFD)
 						if err != nil {
 							fmt.Println(err)
 							continue
@@ -324,6 +332,7 @@ func mysqlLockDetector() {
 						// send warn recover
 						msg["output"] = fmt.Sprintf("Host: %v 锁已全部释放", eachHost.Host)
 						notify.Push(msg)
+						warnSent[eachHost.Host] = 1
 					}
 
 				}
