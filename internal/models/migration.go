@@ -9,6 +9,8 @@ import (
 	"github.com/ouqiang/gocron/internal/modules/logger"
 )
 
+//var LockDetecStatus int 0
+
 type Migration struct{}
 
 // 首次安装, 创建数据库表
@@ -16,7 +18,7 @@ func (migration *Migration) Install(dbName string) error {
 	setting := new(Setting)
 	task := new(Task)
 	tables := []interface{}{
-		&User{}, task, &TaskLog{}, &Host{}, setting, &LoginLog{}, &TaskHost{},
+		&User{}, task, &TaskLog{}, &Host{}, setting, &LoginLog{}, &TaskHost{},MysqlHostLists{},MysqlLocks{},
 	}
 	for _, table := range tables {
 		exist, err := Db.IsTableExist(table)

@@ -6,8 +6,11 @@ package main
 import (
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
-
+	"time"
+	"fmt"
+	"github.com/ouqiang/gocron/internal/modules/notify"
 	"github.com/ouqiang/gocron/internal/models"
 	"github.com/ouqiang/gocron/internal/modules/app"
 	"github.com/ouqiang/gocron/internal/modules/logger"
@@ -20,12 +23,16 @@ import (
 )
 
 var (
+	lockLogFD *os.File
 	AppVersion           = "1.5"
 	BuildDate, GitCommit string
 )
 
 // web服务器默认端口
-const DefaultPort = 5920
+const (
+	DefaultPort = 5920
+	lockRecord_Log  = "/tmp/mysql-lock.log"
+)
 
 func main() {
 	cliApp := cli.NewApp()
@@ -66,6 +73,7 @@ func getCommands() []cli.Command {
 }
 
 func runWeb(ctx *cli.Context) {
+	lockLogFD,_=os.OpenFile(lockRecord_Log,os.O_RDWR|os.O_CREATE|os.O_APPEND,0644)
 	// 设置运行环境
 	setEnvironment(ctx)
 	// 初始化应用
@@ -78,7 +86,10 @@ func runWeb(ctx *cli.Context) {
 	// 注册路由
 	routers.Register(m)
 	// 注册中间件.
+
 	routers.RegisterMiddleware(m)
+	//锁检测
+	go mysqlLockDetector()
 	host := parseHost(ctx)
 	port := parsePort(ctx)
 	m.Run(host, port)
@@ -193,4 +204,133 @@ func upgradeIfNeed() {
 	app.UpdateVersionFile()
 
 	logger.Infof("已升级到最新版本%d", app.VersionId)
+}
+
+
+
+// 数据库锁检测
+func mysqlLockDetector() {
+	warnSent := make(map[string]int,0)
+	for {
+		if ! app.Installed {
+			time.Sleep(10 * time.Second)
+
+			continue
+		}
+		//fmt.Println("test")
+		time.Sleep(1 * time.Second)
+		dbHost := new(models.MysqlHostLists)
+		myLock := new(models.MysqlLocks)
+		hosts, err := dbHost.GetHosts()
+		if err != nil {
+			fmt.Println(err)
+			continue
+		}
+		for _, eachHost := range hosts {
+			if warnSent[eachHost.Host] == 0 {
+				warnSent[eachHost.Host] = 1
+			}
+			//fmt.Println(eachHost)
+			locks, err := myLock.DetecMysqlLocks(eachHost.Host, eachHost.User, eachHost.Password, eachHost.Port)
+			if err != nil {
+				fmt.Println(err)
+				continue
+			}
+			msg := notify.Message{
+				"task_type":        int8(3),
+				"task_receiver_id": 0,
+				"name":             "MySQL 锁检测",
+				"status":           "none",
+				// "task_id":          taskModel.Id,
+			}
+
+
+			if len(locks) > 0 {
+				step := 0
+				outputString := ""
+				for _, eachLock := range locks {
+					rID, err := strconv.ParseInt(string(eachLock["request_mysql_ID"]), 10, 64)
+					if err != nil {
+						fmt.Println(err)
+						continue
+					}
+					bID, err := strconv.ParseInt(string(eachLock["blocking_mysql_ID"]), 10, 64)
+					if err != nil {
+						fmt.Println(err)
+						continue
+					}
+					lock, err := myLock.GetLock(rID, bID, eachHost.Host)
+					if err != nil {
+						fmt.Println(err)
+						continue
+					}
+					if len(lock) == 0 {
+						step ++
+						fmt.Println(step)
+						if step ==  5 {
+							msg["output"] = fmt.Sprintf("警告： hostname: %v 锁记录数量超过5个 " ,eachHost.Host)
+							notify.Push(msg)
+						}
+						mysqlLock := models.MysqlLocks{
+							HostName:              eachHost.Host,
+							Status:                1,
+							RequestMysqlThreadId:  rID,
+							RequestCommand:        string(eachLock["request_command"]),
+							BlockingMysqlThreadId: bID,
+							BlockingCommand:       string(eachLock["blocking_command"]),
+							LockIndex:             string(eachLock["lock_index"]),
+							CreateTime:            time.Now(),
+						}
+						err = mysqlLock.Add()
+						outputString = fmt.Sprintf("\\[time:%v\\] host: %v MySQL thread ID:%v - Command: %v  blocked by  MySQL thread ID:%v - Command: %v  with index :  %v\n",time.Now(), eachHost.Host, rID, string(eachLock["request_command"]), bID, string(eachLock["blocking_command"]), string(eachLock["lock_index"]))
+						// send Warn
+						//webHook := WebHook{}
+						//go webHook.Send(msg)
+						err = myLock.WriteLogToFile(outputString,lockLogFD)
+						if err != nil {
+							fmt.Println(err)
+							continue
+						}
+
+
+						if err != nil {
+							fmt.Println(err)
+							continue
+						}
+
+					}
+
+
+				}
+
+
+			} else {
+				result, err := myLock.GetLocksByHost(eachHost.Host)
+				if err != nil {
+					fmt.Print(err)
+					continue
+				}
+				if len(result) > 0 {
+					mysqlLock := models.MysqlLocks{
+						Status: 0,
+					}
+					affectRows, err := mysqlLock.ChangeLockStatus(eachHost.Host)
+					if err != nil {
+						fmt.Println(err)
+						continue
+					}
+					fmt.Println("Affect rows: ", affectRows)
+					if affectRows > 5 {
+						// send warn recover
+						msg["output"] = fmt.Sprintf("Host: %v 锁已全部释放", eachHost.Host)
+						notify.Push(msg)
+					}
+
+				}
+
+			}
+
+		}
+
+	}
 }
